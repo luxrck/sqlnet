@@ -1,11 +1,18 @@
 import itertools
 import random
 import torch
-from transformers import BertTokenizer
+
+from utils.utils_wikisql import load_wikisql, get_loader_wikisql
 
 
-bert_tokenizer = BertTokenizer.from_pretrained("hfl/chinese-bert-wwm-ext")
-# bert_tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+
+def get_data(path_wikisql, bs=16):
+    train_data, train_table, dev_data, dev_table, _, _ = load_wikisql(path_wikisql, toy_model=False, toy_size=10,
+                                                                      no_w2i=True, no_hs_tok=True)
+    train_loader, dev_loader = get_loader_wikisql(train_data, dev_data, bs, shuffle_train=True)
+
+    return train_data, train_table, dev_data, dev_table, train_loader, dev_loader
+
 
 
 def find_se(x, it):
@@ -14,6 +21,7 @@ def find_se(x, it):
         if x[i:i+l] == it:
             return i, i+l-1
     raise RuntimeError(f"Could not find '{it}' in {x}")
+
 
 
 def get_gold(records, table):
@@ -54,7 +62,7 @@ def get_gold(records, table):
 # max_seq_len: 246
 # max_headers: 24
 # max_q_len: 86
-def generate_inputs(records, table, padding_to=300, max_headers=30, max_selected=4, device="cuda"):
+def generate_inputs(bert_tokenizer, records, table, padding_to=300, max_headers=30, max_selected=4, device="cuda"):
     PAD = 0
     CLS = 101
     SEP = 102
@@ -324,223 +332,3 @@ def generate_inputs(records, table, padding_to=300, max_headers=30, max_selected
     # import pdb; pdb.set_trace()
     return (x_input, attention_mask, token_type_ids, q_length, h_length, seps), \
         (gs_num, gs_col, gs_agg, gw_num, gw_conn_op, gw_col, gw_op, gw_val, gw_val_match), (col_sel, col_whr, col_match), gold
-
-
-def load_inputs(records, table, device="cuda"):
-    x = []
-    attention_mask = []
-    token_type_ids = []
-    # q_mask = torch.zeros(bs, padding_to, dtype=torch.long).to(device)
-    # h_mask = torch.zeros(bs, padding_to, dtype=torch.long).to(device)
-    # attention_mask = torch.zeros(bs, padding_to, dtype=torch.long).to(device)
-    q_length = []
-    h_length = []
-    seps = []
-
-    gs_num = []
-    gs_col = []
-    gs_agg = []
-    gw_num = []
-    gw_conn_op = []
-    gw_col = []
-    gw_op = []
-    gw_val_s = []
-    gw_val_e = []
-
-    col_sel = []
-    col_whr = []
-
-    for rec in records:
-        inputs = rec["inputs"]
-        labels = rec["labels"]
-        cols = rec["cols"]
-
-        _x, att, tok_ids, q_l, h_l, _seps = inputs
-        x.append(_x)
-        attention_mask.append(att)
-        token_type_ids.append(tok_ids)
-        q_length += q_l
-        h_length += h_l
-        seps.append(_seps)
-
-        s_num, s_col, s_agg, w_num, w_conn_op, w_col, w_op, w_val_s, w_val_e = labels
-
-        gs_num += s_num
-        gs_col += s_col
-        gs_agg += s_agg
-        gw_num += w_num
-        gw_conn_op += w_conn_op
-        gw_col += w_col
-        gw_op += w_op
-        gw_val_s += w_val_s
-        gw_val_e += w_val_e
-
-        cs, cw = cols
-
-        col_sel += cs
-        col_whr += cw
-
-    x = torch.tensor(x).to(device)
-    attention_mask = torch.tensor(attention_mask).to(device)
-    token_type_ids = torch.tensor(token_type_ids).to(device)
-
-    return (x, attention_mask, token_type_ids, q_length, h_length, seps), \
-           (gs_num, gs_col, gs_agg, gw_num, gw_conn_op, gw_col, gw_op, gw_val_s, gw_val_e), \
-           (col_sel, col_whr)
-
-
-def generate_input_(record, table, padding_to=300, max_headers=100, max_selected=4, device="cuda"):
-    SEP = 102
-    EMPTY = 90 # [unused90]
-    # import pdb; pdb.set_trace()
-    # type_q
-    # type_h_text
-    # type_h_real
-    # type_h_empty
-    # token_types = 4
-    head_type_map = {
-        "text": 1,
-        "real": 2,
-        "empty": 3
-    }
-
-    TEXT = '[unused1]'
-    REAL = '[unused4]'
-
-    rec = record
-    # bs = len(records)
-
-    # x_input = torch.zeros(bs, padding_to, dtype=torch.long).to(device)
-    x_input = [0] * padding_to
-    attention_mask = []
-    token_type_ids = []
-    # q_mask = torch.zeros(bs, padding_to, dtype=torch.long).to(device)
-    # h_mask = torch.zeros(bs, padding_to, dtype=torch.long).to(device)
-    # attention_mask = torch.zeros(bs, padding_to, dtype=torch.long).to(device)
-    q_length = []
-    h_length = []
-    seps = []
-
-    gs_num = []
-    gs_col = []
-    gs_agg = []
-    gw_num = []
-    gw_conn_op = []
-    gw_col = []
-    gw_op = []
-    gw_val_s = []
-    gw_val_e = []
-
-    col_sel = []
-    col_whr = []
-    
-    # for b, rec in enumerate(records):
-    tid = rec["table_id"]
-    tb = table[tid]
-    q = rec["question"]
-    sql = rec["sql"]
-    agg = sql["agg"]
-    
-    if type(agg) != list:
-        agg = [agg]
-    sel = sql["sel"]
-    if type(sel) != list:
-        sel = [sel]
-
-    conn_op = sql.get("cond_conn_op", 1)
-    conds = sql["conds"]
-
-    header = tb["header"]
-    header_types = tb["types"]
-
-    l_header = len(header)
-    l_conds = len(conds)
-    s_num = len(sel)
-
-    if s_num > 0:
-        s_num -= 1
-    if l_conds > 0:
-        l_conds -= 1
-
-    q_tok = bert_tokenizer.tokenize(q, add_special_tokens=False)
-    q_length.append(len(q_tok))
-
-    # + [EMPTY] col
-    h_length.append(l_header + 1)
-    gs_num.append(s_num)
-    gw_num.append(l_conds)
-    col_sel.append(sel[:])
-    col_whr.append([item[0] for item in conds])
-    gw_conn_op.append((0 if conn_op < 2 else 1))
-
-    # w_col = [0] * l_header + [-1] * (max_headers - l_header)
-    w_col = [0] * max_headers
-    w_op = [-1] * max_headers
-    w_col_vs = [-1] * max_headers
-    w_col_ve = [-1] * max_headers
-    n_cond = len(conds)
-    p_cond = (1 / n_cond if n_cond > 0 else 0)
-    for i,cond in enumerate(conds):
-        w_col[cond[0]] = p_cond
-        w_op[cond[0]] = cond[1]
-        w_v = str(cond[2])
-        # import pdb; pdb.set_trace()
-        w_v_t = bert_tokenizer.tokenize(w_v)
-        ws, we = find_se(['CLS'] + q_tok, w_v_t, w_v)
-        w_col_vs[cond[0]] = ws-1
-        w_col_ve[cond[0]] = we-1
-        # w_col_vs.append(ws-1)
-        # w_col_ve.append(we-1)
-    gw_val_s.append(w_col_vs)# + [0] * (max_selected - len(w_col_vs)))
-    gw_val_e.append(w_col_ve)# + [0] * (max_selected - len(w_col_ve)))
-    if n_cond == 0:
-        w_col[h_length] = 1.
-    gw_col.append(w_col)
-    gw_op.append(w_op)
-
-    
-    # s_col = [0] * l_header + [-1] * (max_headers - l_header)
-    s_col = [0] * max_headers
-    s_agg = [-1] * max_headers
-    n_sel = len(sel)
-    p_sel = (1 / n_sel if n_sel > 0 else 0)
-    for i,col in enumerate(sel):
-        s_col[col] = p_sel
-        s_agg[col] = agg[i]
-    if n_sel == 0:
-        scol[l_header] = 1.
-    gs_col.append(s_col)
-    gs_agg.append(s_agg)
-    
-
-    x = f"[CLS] {q} [SEP] {' [SEP] '.join(header)} [SEP]"
-    # x = bert_tokenizer.encode(x, add_special_tokens=False, max_length=padding_to)
-    # attention_mask = [1] * len(x) + [0] * (padding_to - len(x))
-    # # x_input[b, :x.size(-1)] = x
-    # # attention_mask[b, :x.size(-1)] = 1
-    # sep_i = (x == SEP).nonzero().squeeze(1)
-    # seps.append(sep_i)
-    x = bert_tokenizer.encode(x, add_special_tokens=False)
-    x += [EMPTY, SEP]
-    seq_len = len(x)
-    x += [0] * (padding_to - seq_len)
-    x = torch.tensor(x, dtype=torch.long).to(device)
-    # x_input[b, :x.size(-1)] = x
-    # attention_mask[b, :x.size(-1)] = 1
-    attention_mask = [1] * seq_len + [0] * (padding_to - seq_len)
-    token_type_ids = []
-    seps = (x == SEP).nonzero().squeeze(1).tolist()
-    token_type_ids += [0] * (seps[0] + 1)
-    h_index = 0
-    for r,l in zip(seps[1:], seps[:-1]):
-        h_type = (header_types[h_index] if h_index < len(header) else "empty")
-        h_len = r-l
-        token_type_ids += [head_type_map[h_type]] * h_len
-        h_index += 1
-    token_type_ids += [0] * (padding_to - len(token_type_ids))
-
-    # seps.append(sep_i)
-
-    return (x.tolist(), attention_mask, token_type_ids, q_length, h_length, seps), \
-           (gs_num, gs_col, gs_agg, gw_num, gw_conn_op, gw_col, gw_op, gw_val_s, gw_val_e), \
-           (col_sel, col_whr)

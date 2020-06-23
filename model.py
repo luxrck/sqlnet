@@ -94,56 +94,36 @@ class LinearLayer(nn.Module):
 
 
 
-class Matcher(nn.Module):
-    def __init__(self, d_hidden):
-        super().__init__()
-        self.proj_a = nn.Linear(d_hidden, d_hidden)
-        self.proj_b = nn.Linear(d_hidden, d_hidden)
-        self.out = nn.Sequential(
-                    nn.Tanh(),
-                    nn.Linear(d_hidden, 1))
-    def forward(self, a, b):
-        a_len = a.size(1)
-        b_len = b.size(1)
-
-        a = self.proj_a(a)
-        b = self.proj_b(b)
-
-        x = a.unsqueeze(2).expand(-1, -1, b_len, -1) + b.unsqueeze(1).expand(-1, a_len, -1, -1)
-
-        x = self.out(x)
-        return x
-
-
-
 # Multi column / Multi Aggs
 class SQLNet(nn.Module):
     COND_OP = {0: "NOP", 1: ">", 2: "<", 3: "==", 4: "!="}
     COND_CONN_OP = {0: "NOP", 1: "and", 2: "or"}
     AGG_OP = {0: "NOP", 1: "", 2: "AVG", 3: "MAX", 4: "MIN", 5: "COUNT", 6: "SUM"}
 
-    def __init__(self, bert):
+    max_q_len = 150
+    max_headers = 30
+    max_sel = 4
+    max_whr = 4
+    def __init__(self, bert, dropout_p=0.1):
         super().__init__()
         self.bert = bert
-        self.q_len = 150
-        self.h_max_sel = 4
-        self.h_max_whr = 4
+
         self.d_hidden = self.bert.config.hidden_size
 
-        self.select_num = LinearLayer(self.d_hidden, 4)
+        self.select_num = LinearLayer(self.d_hidden, 4, dropout_p=dropout_p)
         # [not_selected, agg0, agg1, ... , agg5]
-        self.select_column = LinearLayer(self.d_hidden, 1)
-        self.select_agg = LinearLayer(self.d_hidden, 6)
+        self.select_column = LinearLayer(self.d_hidden, 1, dropout_p=dropout_p)
+        self.select_agg = LinearLayer(self.d_hidden, 6, dropout_p=dropout_p)
         # self.select_agg = nn.Linear(self.bert.config.hidden_size, 1)
 
         # [0: and, 1: or]
-        self.where_conn_op = LinearLayer(self.d_hidden, 2)
+        self.where_conn_op = LinearLayer(self.d_hidden, 2, dropout_p=dropout_p)
         # where clause could be none
-        self.where_num = LinearLayer(self.d_hidden, 4+1)
+        self.where_num = LinearLayer(self.d_hidden, 4+1, dropout_p=dropout_p)
         # [not_selected, col_on_op1, ... , col_on_op4]
         
-        self.where_column = LinearLayer(self.d_hidden, 1)
-        self.where_op = LinearLayer(self.d_hidden, 4)
+        self.where_column = LinearLayer(self.d_hidden, 1, dropout_p=dropout_p)
+        self.where_op = LinearLayer(self.d_hidden, 4, dropout_p=dropout_p)
 
         # per column
         self.where_val_s_rh = LinearLayer(self.d_hidden, self.d_hidden)
@@ -152,14 +132,14 @@ class SQLNet(nn.Module):
         self.where_val_e = LinearLayer(self.d_hidden, 1)
 
         # POS Tag: 0:not val.  1: val.
-        self.where_val = LinearLayer(self.d_hidden, 2)
+        self.where_val = LinearLayer(self.d_hidden, 2, dropout_p=dropout_p)
         # self.where_val = 
         # self.where_val = nn.Linear(self.d_hidden, 2)
 
-        self.where_match = LinearLayer(self.d_hidden, 1)#, fc_activation=nn.Tanh())
+        self.where_match = LinearLayer(self.d_hidden, 1, dropout_p=dropout_p)#, fc_activation=nn.Tanh())
         # self.where_match = Matcher(self.d_hidden)
 
-        self.attention = Attention()
+        self.attention = Attention(dropout_p=dropout_p)
 
         # self.init_weights()
 
@@ -354,7 +334,7 @@ class SQLNet(nn.Module):
             w_val_se.append(v_s_)
         return v_enc, w_val_se
     
-    def loss(self, y_predict, labels, col_sel=None, col_whr=None, detail=False, records=[], table={}, iter=None):
+    def loss(self, y_predict, labels):
         s_num, s_col, s_agg, w_num, w_conn_op, w_col, w_op, w_val_s, w_val_e, w_val, w_val_match, w_val_se = y_predict
         gs_num, gs_col, gs_agg, gw_num, gw_conn_op, gw_col, gw_op, gw_val, gw_val_match = labels
         # import pdb; pdb.set_trace()
@@ -445,25 +425,18 @@ class SQLNet(nn.Module):
         # import pdb; pdb.set_trace()
         # loss_wv_match = F.cross_entropy(w_val_match.view(-1, 2), gw_val_match.contiguous().view(-1), ignore_index=-1)
         # loss_wv_match = 0
-        if iter and iter % 500 == 0:
-            print(loss_wc.item(), loss_wv.item(), loss_wv_match.item())
-        if math.isnan(loss_wv_match.item()):
-            import pdb; pdb.set_trace()
+        # if iter and iter % 500 == 0:
+        #     print(loss_wc.item(), loss_wv.item(), loss_wv_match.item())
+        # if math.isnan(loss_wv_match.item()):
+        #     import pdb; pdb.set_trace()
         
         loss = loss_sn + loss_sc + loss_sa + loss_co + loss_wn + loss_wc + loss_wo + loss_wv + loss_wv_match
 
         labels = (gs_num, gs_col, gs_agg, gw_num, gw_conn_op, gw_col, gw_op, gw_val, gw_val_match)
 
-        if detail:
-            return loss, self.detail(y_predict,
-                                      labels,
-                                      col_sel=col_sel,
-                                      col_whr=col_whr,
-                                      records=records,
-                                      table=table)
-        return loss, (labels, (col_sel, col_whr))
+        return loss, labels
     
-    def predict(self, y_predict, labels, q_length=None, h_length=None, gwvse=None):
+    def predict(self, y_predict, q_length=None, h_length=None, gwvse=None):
         s_num, s_col, s_agg, w_num, w_conn_op, w_col, w_op, w_val_s, w_val_e, w_val, w_val_match, w_val_se = y_predict
 
         bs = s_col.size(0)

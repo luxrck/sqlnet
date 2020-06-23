@@ -34,37 +34,52 @@ class Checkpoint(object):
         self.checkpoint_root = os.path.join(self.app.app_root, root)
         return self
 
-    def fastforward(self, index=-1):
+    def fastforward(self, to=-1):
         @self.app.on("train_started")
         def forward(e):
-            self._fastforward(index=index)
+            self._fastforward(to=to)
         return self
-    def _fastforward(self, index=-1):
+    def _fastforward(self, to="last"):
         app = self.app
         checkpoint = self.checkpoint_root
         model_name = app.model.__class__.__name__
         if not os.path.exists(checkpoint):
             os.mkdir(checkpoint)
         state = None
-        key = lambda x: re.search(f"(?<={model_name}\.)(\d+)(?=\.pt)", x)
-        fastforward = list(filter(key, list(os.walk(checkpoint))[0][2]))
-        if fastforward:
-            fastforward = sorted(fastforward, key=lambda x: int(key(x).group(0)))
-            model_location = os.path.join(checkpoint, fastforward[index])
+        to_model = None
+        fastforward = list(os.walk(checkpoint))[0][2]
+        if to == "last":
+            key = lambda x: re.findall(f"(?<={model_name}\.)(\d+)(?=\.pt)", x) or [-1]
+            fastforward = list(filter(key, list(os.walk(checkpoint))[0][2]))
+            if fastforward:
+                fastforward = sorted(fastforward, key=lambda x: int(key(x)[0]))
+                to_model = fastforward[-1]
+        elif to == "best":
+            to_model = f"{model_name}.best.pt"
+        else:
+            for name in fastforward:
+                if re.search(to, name) is not None:
+                    to_model = name
+        if to_model:
+            model_location = os.path.join(checkpoint, to_model)
             state = torch.load(model_location, map_location=app.device)
         if state:
-            app.current_iter = state["start"]
+            if "start" in state:
+                app.current_iter = state["start"]
             app.model.load_state_dict(state["model"])
             # By default all the modules are initialized to train mode (self.training = True).
             # Also be aware that some layers have different behavior during train/and evaluation
             # (like BatchNorm, Dropout) so setting it matters.
             app.model.train()
-            app.optimizer.load_state_dict(state["optim"])
+            if "optim" in state:
+                app.optimizer.load_state_dict(state["optim"])
         return self
 
-    def save_every(self, iters=1000):
+    def save_every(self, iters=-1):
         @self.app.on("iter_completed")
         def save(e):
+            if iters <= 0:
+                return self
             current_iter = e.current_iter
             if current_iter % iters == 0:
                 torch.save({"start": current_iter + 1, "model": e.model.state_dict(), "optim": e.optimizer.state_dict()},
@@ -133,13 +148,18 @@ class Trainer(object):
             for _,batch in tqdm(enumerate(data)):
                 # TODO: Not a good implementation...
                 results = self.exec_handles("evaluate",
-                                                 Trainer.Event(name="evaluate", trainer=self, batch=batch, model=self.model, criterion=self.criterion, optimizer=self.optimizer))[0]
+                                            Trainer.Event(name="evaluate",
+                                                          trainer=self,
+                                                          batch=batch,
+                                                          model=self.model,
+                                                          device=self.device,
+                                                          optimizer=self.optimizer))[0]
                 if results is not None and len(results) == 2:
                     y_predicted, targets = results
                     oy_p.append(y_predicted)
                     oy_g.append(targets)
-        oy_p = torch.cat(oy_p, dim=0)
-        oy_g = torch.cat(oy_g, dim=0)
+        # oy_p = torch.cat(oy_p, dim=0)
+        # oy_g = torch.cat(oy_g, dim=0)
         return oy_p, oy_g
 
     def run(self, data, max_iters=1000, train=True):
@@ -147,30 +167,65 @@ class Trainer(object):
         self.optimizer = self.optimizer_builder()
 
         meta = Trainer.Event(name="meta")
-        progress = tqdm(total=max_iters, miniters=0)
-        event = Trainer.Event(name="e", a=meta, progress=progress, trainer=self, model=self.model, criterion=self.criterion, optimizer=self.optimizer)
+        event = Trainer.Event(name="e",
+                              a=meta,
+                              trainer=self,
+                              model=self.model,
+                              device=self.device,
+                              optimizer=self.optimizer)
 
         self.exec_handles("train_started", event)
-
-        current_iter = self.current_iter
-        event.progress.n = current_iter
-        event.progress.last_print_n = current_iter
 
         if train == False:
             self.exec_handles("train_completed", event)
             return self
 
+        progress = tqdm(total=max_iters, miniters=0)
+        current_iter = self.current_iter
+        event.progress.n = current_iter
+        event.progress.last_print_n = current_iter
+
+        event.progress = progress
+
         while current_iter < max_iters + 1:
             iterator = enumerate(data)
+            
+            avg_loss = 0
+            valid_iters = 0
+            event.info = defaultdict(int)
+            
             for i,batch in iterator:
                 event.current_iter = current_iter
                 event.batch = batch
+                event.i = i
+
                 self.exec_handles("iter_started", event)
+
+                result = self.exec_handles("train", event)[0]
+                loss = result["loss"]
+                info = result.get("info", defaultdict(int))
+
+                if loss < 0:
+                    continue
+                valid_iters += 1
+
+                self.optimizer.step()
+
+                avg_loss += loss
+                progress.set_postfix(avg_loss = avg_loss / cnt)
+
+                for info_k, info_v in info.items():
+                    event.info[info_k] += info_v
+
                 self.exec_handles("iter_completed", event)
+
                 current_iter += 1
                 if current_iter >= max_iters + 1:
                     break
+                
                 event.progress.update(1)
+            print({k: v/valid_iters for k,v in event.info.items()})
+
         self.exec_handles("train_completed", event)
         return self
 
@@ -205,17 +260,15 @@ class Trainer(object):
 
 
 class App(object):
-    def __init__(self, name="", root=".", **kwargs):
+    def __init__(self, model, name="", root=".", device="cpu", **kwargs):
         self.app_name = name or os.path.basename(sys.modules[__name__].__file__)
         self.app_root = root
+        self.model = model
+        self.device = device
         self.config(**kwargs)
 
     def config(self, **kwargs):
-        default = {
-            "device": "cpu",
-            "model": None,
-            "criterion": None,
-            }
+        default = {}
         default.update(kwargs)
         self.c = default
         for key,val in default.items():
@@ -227,10 +280,11 @@ class App(object):
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
         self.model = self.model.to(device)
-        self.criterion = self.criterion.to(device)
+        # self.criterion = self.criterion.to(device)
         return self
 
     def half(self):
         if torch.cuda.is_available():
-            self.model, self.criterion = self.model.half(), self.criterion.half()
+            # self.model, self.criterion = self.model.half(), self.criterion.half()
+            self.model = self.model.half()
         return self
