@@ -2,6 +2,8 @@ import sys
 import json
 import traceback
 
+import sqlite3
+
 import torch
 from torch.autograd import Variable
 from torch import nn, optim
@@ -20,14 +22,34 @@ from train import *
 torch.cuda.set_device(0)
 
 
-if __name__ == "__main__":
+
+def infer(q, tables):
+    global app, db, bert_tokenizer
+    app.model.eval()
+    sqls = []
+    with torch.no_grad():
+        inputs = generate_inputs(bert_tokenizer, q, tables)
+        y_predict = app.model(inputs)
+        sqli = app.model.predict(y_predict, h_length=inputs[-2])
+        sqls = app.model.sql(sqli, q, tables)
+
+        for b,sql in enumerate(sqls):
+            resp = db.execute(sql["sql"]).fetchall()
+            sql["data"] = resp
+    return sqls
+
+
+def xsql_init():
+    bs = 16
     path_wikisql = "data/nl2sql"
     bert_type = "hfl/chinese-bert-wwm-ext"
     dropout_p = 0.1
-    bs = 16
     device = "cuda"
+    
+    global app, db, bert_tokenizer
+    # train_data, train_table, dev_data, dev_table, train_iter, dev_iter = get_data(path_wikisql, bs=bs)
 
-    train_data, train_table, dev_data, dev_table, train_iter, dev_iter = get_data(path_wikisql, bs=bs)
+    db = sqlite3.connect("data/nl2sql/nl2sql.sqlite3")
 
     print("Load bert....")
     bert = BertModel.from_pretrained(bert_type, output_hidden_states=True)
@@ -35,7 +57,35 @@ if __name__ == "__main__":
     print("Load bert....[OK]")
     model = SQLNet(bert, dropout_p=dropout_p).to(device)
 
-    app = Trainer(App(model=model))
+    app = App(model=model)
+    app.extend(Checkpoint())
+
+    app = app.fastforward(to="last")   \
+       .set_optimizer(optim.AdamW, lr=1e-6) \
+       .to("auto")  \
+       .save_every(iters=-1)    \
+       .build() \
+       .eval()
+
+
+if __name__ == "__main__":
+    bs = 16
+    path_wikisql = "data/nl2sql"
+    bert_type = "hfl/chinese-bert-wwm-ext"
+    dropout_p = 0.1
+    device = "cuda"
+    
+    train_data, train_table, dev_data, dev_table, train_iter, dev_iter = get_data(path_wikisql, bs=bs)
+
+    db = sqlite3.connect("data/nl2sql/nl2sql.sqlite3")
+
+    print("Load bert....")
+    bert = BertModel.from_pretrained(bert_type, output_hidden_states=True)
+    bert_tokenizer = BertTokenizer.from_pretrained(bert_type)
+    print("Load bert....[OK]")
+    model = SQLNet(bert, dropout_p=dropout_p).to(device)
+
+    app = App(model=model)
     app.extend(Checkpoint())
 
 
@@ -44,16 +94,17 @@ if __name__ == "__main__":
         e.model.zero_grad()
         inputs, labels, col_sel, col_whr, col_match, gold = None, None, None, None, None, None
         try:
-            inputs, labels, (col_sel, col_whr, col_match), gold = generate_inputs(bert_tokenizer, e.batch, train_table, device=e.device)
+            inputs, labels, (col_sel, col_whr, col_match), gold = generate_samples(bert_tokenizer, e.batch, train_table, device=e.device)
         except Exception as e:
             print(e)
             return {
                 "loss": -1,
                 }
-            
-        y_predict = model(inputs, labels)
-        loss, labels = model.loss(y_predict, labels)
-        sql_i = model.predict(y_predict, labels, q_length=inputs[3], h_length=inputs[4])
+        
+        gw_val = labels[-2]
+        y_predict = model(inputs, gw_val=gw_val)
+        loss, labels = model.loss(y_predict, gw_val=gw_val)
+        # sql_i = model.predict(y_predict, labels, q_length=inputs[3], h_length=inputs[4])
         detail = model.detail(y_predict, labels, col_sel=col_sel, col_whr=col_whr, col_match=col_match, q_length=inputs[3], records=t, table=train_table)
 
         loss.backward()
@@ -84,27 +135,34 @@ if __name__ == "__main__":
 
     @app.on("evaluate")
     def sql_eval(e):
+        model = e.model
         inputs, labels, col_sel, col_whr, col_match, gold = None, None, None, None, None, None
         try:
-            inputs, labels, (col_sel, col_whr, col_match), gold = generate_inputs(bert_tokenizer, e.batch, dev_table, device=e.device)
+            inputs, labels, (col_sel, col_whr, col_match), gold = generate_samples(bert_tokenizer, e.batch, train_table, device=e.device)
         except Exception as e:
-            # print(e)
-            traceback.print_tb()
+            print(e)
+            # traceback.print_tb()
             sys.exit()
 
-        y_predict = model(inputs, labels)
+        gw_val = labels[-2]
+        gw_val = None
+        y_predict = model(inputs, gw_val=gw_val)
         # loss, labels = model.loss(y_predict, labels)
-        sql_i = model.predict(y_predict, q_length=inputs[3], h_length=inputs[4])
-        
+        sql_i = model.predict(y_predict, h_length=inputs[4])
+        import pdb; pdb.set_trace()
+        # sql = model.sql(sql_i, e.batch, train_table)
+
         return sql_i, gold
 
 
-    y, g = app.fastforward(to="last")   \
+    y,g = app.fastforward(to="last")   \
        .set_optimizer(optim.AdamW, lr=1e-6) \
        .to("auto")  \
-       .save_every(iters=-1)  \
-       .run(train_iter, max_iters=10000, train=False)   \
-       .eval(dev_iter)
+       .save_every(iters=-1)    \
+       .build() \
+       .eval(train_iter)
+    #    .run(train_iter, max_iters=10000, train=False)
+    #    .eval(train_iter)
     
     lx = 0
     cnt = 0
@@ -119,3 +177,17 @@ if __name__ == "__main__":
                 lx += 1
             cnt += 1
     print(lx / cnt)
+    # app.model.eval()
+    # with torch.no_grad():
+    #     table_id = None
+    #     while True:
+    #         text = input("> ")
+    #         if 'use' in text:
+    #             table_id = text.split(' ')[1]
+    #         else:
+    #             q = {"question": text, "table_id": table_id}
+    #             import pdb; pdb.set_trace()
+    #             try:
+    #                 print(infer([q], train_table))
+    #             except Exception as e:
+    #                 print(e)

@@ -1,0 +1,121 @@
+{% extends "_base" %}
+
+{% block title %}<title>Text-to-SQL demo</title>{% endblock %}
+
+
+{% block main %}
+<!-- Modal -->
+<div class="modal fade" id="qa-result-modal" tabindex="-1" role="dialog" aria-labelledby="qa-result-modal-label" aria-hidden="true">
+<div class="modal-dialog modal-lg" role="document">
+  <div class="modal-content">
+  <div class="modal-header">
+    <div class="modal-title">
+    <h5 id="qa-result-modal-label">Results</h5>
+    </div>
+    <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+    <span aria-hidden="true">&times;</span>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p id="qa-result-sql" class="mb-1"></p>
+    <table id="qa-result"></table>
+  </div>
+  </div>
+</div>
+</div>
+
+<div class="col">
+  <div class="col">
+    <div class="input-group mb-3">
+      <input type="text" class="form-control" aria-describedby="qa-search" id="qa-input">
+      <div class="input-group-append">
+        <button class="btn btn-outline-secondary" type="button" id="qa-search">Search Answer</button>
+        <button class="btn btn-outline-secondary" type="button" id="sql-table-prev">Prev</button>
+        <button class="btn btn-outline-secondary" type="button" id="sql-table-next">Next</button>
+      </div>
+    </div>
+    <div id="__qa-results"></div>
+  </div>
+  <div class="col">
+    <table class="table">
+    <thead>
+      <tr>
+        {% for hdr in headers %}
+        <th scope="col">{{hdr}}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+    <tr>
+      {% for cell in row %}
+      <td>{{cell}}</td>
+      {% endfor %}
+    </tr>
+    {% endfor%}
+    </tbody>
+    </table>
+    <div class="row">
+
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+
+{% block script %}
+<link rel="stylesheet" href="https://unpkg.com/bootstrap-table@1.16.0/dist/bootstrap-table.min.css">
+<script src="https://unpkg.com/bootstrap-table@1.16.0/dist/bootstrap-table.min.js"></script>
+
+<style>
+.input-group-append {
+  width: 40%;
+}
+</style>
+
+<script>
+$("#qa-search").on("click", function(e) {
+  $.get({
+    url: "/nl2sql/api/qa",
+    data: {q: document.querySelector("#qa-input").value, table_idx: window.table_idx}
+  }).done(function(e) {
+    console.log(e);
+    sel = [];
+    for (var i in e.sel) {
+      sel.push({title: e.sel[i], field: i})
+    }
+    var data = [];
+    for (var i in e.data) {
+      var row = e.data[i];
+      var row_data = {}
+      for (var j in row) {
+        row_data[j] = row[j];
+      }
+      data.push(row_data);
+    }
+    console.log(sel, data);
+    $("#qa-result").bootstrapTable("destroy");
+    $("#qa-result").bootstrapTable({
+      columns: sel,
+      data: data,
+    });
+
+    $("#qa-result").bootstrapTable("refresh", {data: data});
+    
+    document.querySelector("#qa-result-sql").innerText = e.sql;
+    
+    $("#qa-result-modal").modal("show");
+  })
+});
+
+$("#sql-table-prev").on("click", (e) => {
+  window.location.href = `/nl2sql/table/${window.table_idx-1}`
+});
+
+$("#sql-table-next").on("click", (e) => {
+  window.location.href = `/nl2sql/table/${window.table_idx+1}`
+});
+
+window.table_idx = {{table_idx}};
+</script>
+{% endblock %}

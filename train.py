@@ -34,10 +34,11 @@ class Checkpoint(object):
         self.checkpoint_root = os.path.join(self.app.app_root, root)
         return self
 
-    def fastforward(self, to=-1):
-        @self.app.on("train_started")
-        def forward(e):
-            self._fastforward(to=to)
+    def fastforward(self, to="last"):
+        self._fastforward(to=to)
+        # @self.app.on("train_started")
+        # def forward(e):
+        #     self._fastforward(to=to)
         return self
     def _fastforward(self, to="last"):
         app = self.app
@@ -49,8 +50,9 @@ class Checkpoint(object):
         to_model = None
         fastforward = list(os.walk(checkpoint))[0][2]
         if to == "last":
+            # import pdb; pdb.set_trace()
             key = lambda x: re.findall(f"(?<={model_name}\.)(\d+)(?=\.pt)", x) or [-1]
-            fastforward = list(filter(key, list(os.walk(checkpoint))[0][2]))
+            fastforward = list(filter(key, fastforward))
             if fastforward:
                 fastforward = sorted(fastforward, key=lambda x: int(key(x)[0]))
                 to_model = fastforward[-1]
@@ -62,6 +64,7 @@ class Checkpoint(object):
                     to_model = name
         if to_model:
             model_location = os.path.join(checkpoint, to_model)
+            print("Fastforward to:", model_location)
             state = torch.load(model_location, map_location=app.device)
         if state:
             if "start" in state:
@@ -88,7 +91,7 @@ class Checkpoint(object):
 
 
 
-class Trainer(object):
+class App(object):
     r'''
     Events:
         train_started:
@@ -105,13 +108,42 @@ class Trainer(object):
         def __setattr__(self, k, v):
             self.__dict__[k] = v
 
-    def __init__(self, app):
-        self.app = app
+    def __init__(self, model, name="", root=".", device="cpu", **kwargs):
+        # self.app = app
+        self.app_name = name or os.path.basename(sys.modules[__name__].__file__)
+        self.app_root = root
+        self.model = model
+        self.device = device
+        self.config(**kwargs)
+
         self.event_map = defaultdict(set)
         self.event_map["train"] = self.event_map["iter_started"]
 
         self.extension_map = {}
         self.current_iter = 1
+
+    def config(self, **kwargs):
+        default = {}
+        default.update(kwargs)
+        self.c = default
+        for key,val in default.items():
+            self.__setattr__(key, val)
+        return self
+
+    def to(self, device):
+        if device == "auto":
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
+        self.model = self.model.to(device)
+        # self.criterion = self.criterion.to(device)
+        return self
+
+    def half(self):
+        if torch.cuda.is_available():
+            # self.model, self.criterion = self.model.half(), self.criterion.half()
+            self.model = self.model.half()
+        return self
+
 
     def extend(self, ext):
         ext.bind(self)
@@ -139,8 +171,11 @@ class Trainer(object):
         self.optimizer_builder = functools.partial(op, *args, **kwargs)
         return self
 
-    def eval(self, data):
+    def eval(self, data=None):
         self.model.eval()
+        
+        if data is None:
+            return self
 
         oy_p, oy_g = [], []
 
@@ -148,7 +183,7 @@ class Trainer(object):
             for _,batch in tqdm(enumerate(data)):
                 # TODO: Not a good implementation...
                 results = self.exec_handles("evaluate",
-                                            Trainer.Event(name="evaluate",
+                                            App.Event(name="evaluate",
                                                           trainer=self,
                                                           batch=batch,
                                                           model=self.model,
@@ -161,13 +196,17 @@ class Trainer(object):
         # oy_p = torch.cat(oy_p, dim=0)
         # oy_g = torch.cat(oy_g, dim=0)
         return oy_p, oy_g
+    
+    def build(self):
+        self.model.train()
+        self.optimizer = self.optimizer_builder()
+        return self
 
     def run(self, data, max_iters=1000, train=True):
         self.model.train()
-        self.optimizer = self.optimizer_builder()
 
-        meta = Trainer.Event(name="meta")
-        event = Trainer.Event(name="e",
+        meta = App.Event(name="meta")
+        event = App.Event(name="e",
                               a=meta,
                               trainer=self,
                               model=self.model,
@@ -250,8 +289,8 @@ class Trainer(object):
                 break
             except AttributeError:
                 pass
-        if not v:
-            v = self.app.__getattribute__(k)
+        #if not v:
+        #    v = self.app.__getattribute__(k)
         # import pdb; pdb.set_trace()
         if inspect.ismethod(v):
             return Self(self, v)
@@ -259,32 +298,32 @@ class Trainer(object):
 
 
 
-class App(object):
-    def __init__(self, model, name="", root=".", device="cpu", **kwargs):
-        self.app_name = name or os.path.basename(sys.modules[__name__].__file__)
-        self.app_root = root
-        self.model = model
-        self.device = device
-        self.config(**kwargs)
+# class App(object):
+#     def __init__(self, model, name="", root=".", device="cpu", **kwargs):
+#         self.app_name = name or os.path.basename(sys.modules[__name__].__file__)
+#         self.app_root = root
+#         self.model = model
+#         self.device = device
+#         self.config(**kwargs)
 
-    def config(self, **kwargs):
-        default = {}
-        default.update(kwargs)
-        self.c = default
-        for key,val in default.items():
-            self.__setattr__(key, val)
-        return self
+#     def config(self, **kwargs):
+#         default = {}
+#         default.update(kwargs)
+#         self.c = default
+#         for key,val in default.items():
+#             self.__setattr__(key, val)
+#         return self
 
-    def to(self, device):
-        if device == "auto":
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.device = device
-        self.model = self.model.to(device)
-        # self.criterion = self.criterion.to(device)
-        return self
+#     def to(self, device):
+#         if device == "auto":
+#             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#         self.device = device
+#         self.model = self.model.to(device)
+#         # self.criterion = self.criterion.to(device)
+#         return self
 
-    def half(self):
-        if torch.cuda.is_available():
-            # self.model, self.criterion = self.model.half(), self.criterion.half()
-            self.model = self.model.half()
-        return self
+#     def half(self):
+#         if torch.cuda.is_available():
+#             # self.model, self.criterion = self.model.half(), self.criterion.half()
+#             self.model = self.model.half()
+#         return self

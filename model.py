@@ -145,7 +145,7 @@ class SQLNet(nn.Module):
 
     # (x_input, q_mask, h_mask, attention_mask, seps)
     # x: [batch_size, max_seq_len]
-    def forward(self, inputs, label=None, is_train=True, records=[]):
+    def forward(self, inputs, gw_val=None):
         # import pdb; pdb.set_trace()
         x, attention_mask, token_type_ids, q_length, h_length, seps = inputs
 
@@ -282,7 +282,7 @@ class SQLNet(nn.Module):
 
         # w_col_ = (w_col.squeeze(-1) if label is None else torch.tensor(label[5]).to(device)[:, :h_cnt])
         
-        w_val_ = (w_val.argmax(-1) if label is None else torch.tensor(label[-2]).to(device)[:, :q_len])
+        w_val_ = (w_val.argmax(-1) if gw_val is None else torch.tensor(gw_val).to(device)[:, :q_len])
         v_enc, w_val_se = self.w_val(q_enc, w_val_, q_length=q_length)
         # import pdb; pdb.set_trace()
         # [bs, h_cnt, v_cnt, dim] -> [bs, h_cnt, v_cnt]
@@ -436,7 +436,7 @@ class SQLNet(nn.Module):
 
         return loss, labels
     
-    def predict(self, y_predict, q_length=None, h_length=None, gwvse=None):
+    def predict(self, y_predict, h_length=None, gwvse=None):
         s_num, s_col, s_agg, w_num, w_conn_op, w_col, w_op, w_val_s, w_val_e, w_val, w_val_match, w_val_se = y_predict
 
         bs = s_col.size(0)
@@ -446,7 +446,7 @@ class SQLNet(nn.Module):
         w_num = w_num.argmax(dim=1)
         w_conn_op = w_conn_op.argmax(dim=1)
 
-        topk = (4 if bs > 4 else bs)
+        topk = 4
         # _, s_col = s_col.squeeze(-1).topk(topk)
         s_col = s_col.squeeze(-1)
         s_agg = s_agg.argmax(dim=-1)
@@ -512,9 +512,63 @@ class SQLNet(nn.Module):
             pw_val_match_b.sort()
             result.append([ps_num_b, set(ps_col_agg_b), pw_num_b, pw_conn_op_b, set(pw_col_op_b), set(pw_val_se_b), set(pw_val_match_b)])
         return result
+    
+
+    def sql(self, sqli, records, tables):
+        COND = {0: ">", 1: "<", 2: "==", 3: "!="}
+        CONN = {0: "AND", 1: "OR"}
+        AGG = {0: "", 1: "AVG", 2: "MAX", 3: "MIN", 4: "COUNT", 5: "SUM"}
+
+        sql = []
+        for b,y in enumerate(sqli):
+            q_tok = records[b]["q_tok"]
+            table_id = records[b]["table_id"]
+            headers = tables[table_id]["header"]
+            header_types = tables[table_id]["types"]
+
+            sn, sca, wn, wconn, wco, wv, wvm = y
+            
+            conn = CONN[wconn]
+            wco_map = dict(wco)
+            wvm_lst = [(match // 4, match % 4) for match in wvm]
+            wva = ["".join(q_tok[wvs:wve+1]) for wvs,wve in wv]
+
+            # scols = [f'{AGG[agg]}("{headers[col]}")' for col,agg in sca]
+            scols = []
+            for col,agg in sca:
+                if col >= len(headers):
+                    continue
+                if agg == 0:
+                    ca = f'"{headers[col]}"'
+                else:
+                    ca = f'{AGG[agg]}"({headers[col]})"'
+                scols.append(ca)
+            
+            conds = []
+            for c_idx,v_idx in wvm_lst:
+                col_ = headers[c_idx]
+                op_ = COND[wco_map[c_idx]]
+                val_ = wva[v_idx]
+
+                if op_ in ("==", "=") and header_types[c_idx] == "text":
+                    op_ = "like"
+                    val_ = f"%{val_}%"
+                
+                cond = f'("{col_}" {op_} "{val_}")'
+                conds.append(cond)
+
+            # conds = [f'("{headers[c_idx]}" {COND[wco_map[c_idx]]} "{wva[v_idx]}")' for c_idx, v_idx in wvm_lst]
+
+            sql_tmpl = (f'SELECT DISTINCT {",".join(scols)}\n'
+                        f'FROM "{table_id}"\n'
+                        f'WHERE {f" {conn} ".join(conds)}')
+            
+            sql.append({"sql": sql_tmpl, "sel": scols})
+        
+        return sql
 
 
-    def detail(self, y_predict, labels, col_sel, col_whr, col_match, q_length=[], records=[], table={}):
+    def detail(self, y_predict, labels, col_sel, col_whr, col_match, q_length=[], records=[], tables={}):
         s_num, s_col, s_agg, w_num, w_conn_op, w_col, w_op, w_val_s, w_val_e, w_val, w_val_match, w_val_se = y_predict
         gs_num, gs_col, gs_agg, gw_num, gw_conn_op, gw_col, gw_op, gw_val, gw_val_match = labels
 
