@@ -1,10 +1,19 @@
 import math
+import re
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from transformers import BertPreTrainedModel, BertModel, BertTokenizer
 
+
+def isreal(t):
+    try:
+        float(t)
+        return True
+    except:
+        return False
 
 
 class Attention(nn.Module):
@@ -436,7 +445,7 @@ class SQLNet(nn.Module):
 
         return loss, labels
     
-    def predict(self, y_predict, h_length=None, gwvse=None):
+    def predict(self, y_predict, h_length=None, gwvse=None, records=[], tables={}):
         s_num, s_col, s_agg, w_num, w_conn_op, w_col, w_op, w_val_s, w_val_e, w_val, w_val_match, w_val_se = y_predict
 
         bs = s_col.size(0)
@@ -452,65 +461,180 @@ class SQLNet(nn.Module):
         s_agg = s_agg.argmax(dim=-1)
         w_col = w_col.squeeze(-1)
         # _, w_col = w_col.squeeze(-1).topk(topk)
-        w_op = w_op.argmax(dim=-1)
+        # w_op = w_op.argmax(dim=-1)
         # w_val_s = w_val_s.squeeze(-1).argmax(dim=-1)
         # w_val_e = w_val_e.squeeze(-1).argmax(dim=-1)
         w_val_match = w_val_match.view(bs, -1)
         # _, w_val_match = w_val_match.topk(topk)
-        
+
+        op_blacklist = {
+            "text": set([0, 1]),
+        }
+
+        op_pattern = [
+            r"(之前|以前|前面|小于|(前\d+)|以内|之内|低于|少于|不超过|不大于|不多于)",
+            r"(之后|以后|后面|大于|超过|高于|高出|高过|超出|不少于|不小于)",
+        ]
 
         result = []
 
         for b in range(bs):
+            topk = 3
+            q = records[b]["question"]
+            q_tok = records[b]["q_tok"]
+            table_id = records[b]["table_id"]
+            header_types = tables[table_id]["types"]
             # import pdb; pdb.set_trace()
             # label starts from 0
             ps_num_b = s_num[b].item() + 1
-            if topk > h_length[b]:
-                topk = h_length[b]
-            _, ps_col_b = s_col[b, :h_length[b]].topk(topk)
+            if topk > h_length[b] - 1:
+                topk = h_length[b]-1
+            _, ps_col_b = s_col[b, :h_length[b]-1].topk(topk)
             ps_col_b = ps_col_b[:ps_num_b].tolist()
+
+                # import pdb; pdb.set_trace()
 
             ps_col_agg_b = []
             for col in ps_col_b:
                 agg = s_agg[b, col].item()
                 ps_col_agg_b.append((col, agg))
             pw_conn_op_b = w_conn_op[b].item()
-            
+
             pw_num_b = w_num[b].item()
-            _, pw_col_b = w_col[b, :h_length[b]].topk(topk)
-            pw_col_b = pw_col_b[:pw_num_b].tolist()
-            
-            pwv_num = len(w_val_se[b]) if not gwvse else len(gwvse[b])
-            if pwv_num == 0:
-                result.append([None] * 7)
+
+            if pw_num_b == 0:
+                pw_num_b = 1
+                result.append([ps_num_b, set(ps_col_agg_b), pw_num_b, pw_conn_op_b, set(), set(), set()])
                 continue
+
+            # import pdb; pdb.set_trace()
+            _, pw_col_b = w_col[b, :h_length[b]-1].topk(3)
+            # pw_num_b = 3
+            pw_col_b = pw_col_b[:3].tolist()
+    
+            pwv_num = len(w_val_se[b]) if not gwvse else len(gwvse[b])
+            # always > 0
+            if pwv_num == 0:
+                pwv_num = 1
+                w_val_se[b] = [(0, len(q_tok)-1)]
+                result.append([ps_num_b, set(ps_col_agg_b), pw_num_b, pw_conn_op_b, set(), set(), set()])
+                continue
+            pw_val_se_b = w_val_se[b]
+            # if pwv_num == 0:
+                # result.append([None] * 7)
+                # continue
+            
+            # if pw_num_b == 1 and pwv_num == 1:
+            #     col_ = pw_col_b[0]
+            #     col_type_ = header_types[col_]
+            #     op_ = 2
+            #     _, ops_ = w_op[b, col_].sort(-1, True)
+            #     for op in ops_.tolist():
+            #         if col_type_ == "text":
+            #             if op in (0, 1):
+            #                 continue
+            #         op_ = op
+            #         break
+            #     pw_col_op_b = [(col_, op_)]
+            # elif pw_num_b = 
 
             w_val_match_b = w_val_match[b]
             pw_val_match_b = torch.tensor([-2**31 for _ in range(w_val_match_b.size(0))])
             pw_op_b = []
+            # import pdb; pdb.set_trace()
             for col in pw_col_b:
+                # if col in ps_col_b:
+                #     continue
+                # ignore empty column
+                if col >= h_length[b] - 1:
+                    continue
                 # import pdb; pdb.set_trace()
                 pw_val_match_b[col*4:col*4+pwv_num] = w_val_match_b[col*4:col*4+pwv_num]
-                op = w_op[b, col].item()
-                pw_op_b.append(op)
-            _, pw_val_match_b = pw_val_match_b.topk(pw_num_b)
-            pw_val_match_b = pw_val_match_b.tolist()
+                
+                _, ops = w_op[b, col].sort(-1, True)
+                ops = ops.tolist()
+                # if table_id == "c9899dd4332111e9b4ca542696d6e445":
+                #     import pdb; pdb.set_trace()
+                op_ = 2
+                for i,op1_ in enumerate(ops):
+                    col_type = header_types[col]
+                    if col_type in ("text", ):
+                        if not op1_ in op_blacklist[col_type]:
+                            # if op1_ == 3 and i != 0:
+                            #     continue
+                            op_ = op1_
+                            break
+                    else:
+                        # flag = False
+                        # for pat, op2_ in op_pattern.items():
+                        #     if re.search(pat, q) is not None:
+                        #         op_ = op2_
+                        #         flag = True
+                        #         break
+                        # if flag:
+                        #     break
+                        op_before_matched = re.search(op_pattern[0], q) is not None
+                        op_after_matched = re.search(op_pattern[1], q) is not None
+                        if op_before_matched and not op_after_matched:
+                            op_ = 1
+                        elif op_after_matched and not op_before_matched:
+                            op_ = 0
+                        else:
+                            op_ = op1_
+                        break
+                pw_op_b.append(op_)
+                # pw_op_b.append(op)
 
-            col_op_map = dict([[pw_col_b[i], pw_op_b[i]] for i in range(pw_num_b)])
-
-            pw_col_op_b = []
+            # print(pw_val_se_b)
+            
+            # _, pw_val_match_b = pw_val_match_b.topk(pw_num_b)
+            _, pw_val_match_b = pw_val_match_b.sort(-1, True)
+            pw_val_match_b = pw_val_match_b.tolist()[:3 * pwv_num]
+            pw_val_match_b_1 = []
+            val_matched = set()
             for match in pw_val_match_b:
                 col = match // 4
+                # ignore empty column
+                if col >= h_length[b] - 1:
+                    continue
                 val_idx = match % 4
-                pw_col_op_b.append((col, col_op_map[col]))
+                if val_idx >= pwv_num:
+                    continue
+                col_type = header_types[col]
+                wvs, wve = pw_val_se_b[val_idx]
+                val_ = "".join(q_tok[wvs:wve+1]).replace("#", "")
+                val_type = "real" if isreal(val_) else "text"
+                if col_type != val_type:
+                    continue
+                if len(val_matched) < pwv_num:
+                    if not val_idx in val_matched:
+                        pw_val_match_b_1.append(match)
+                else:
+                    pw_val_match_b_1.append(match)
+                val_matched.add(val_idx)
+            # print(pw_val_match_b_1, pw_num_b)
+            pw_val_match_b_1 = pw_val_match_b_1[:pw_num_b]
+            if not pw_val_match_b_1:
+                pw_val_match_b_1 = pw_val_match_b[:pw_num_b]
 
-            pw_val_se_b = w_val_se[b]
+            col_op_map = dict([[pw_col_b[i], pw_op_b[i]] for i in range(3)])
+            # import pdb; pdb.set_trace()
+
+            pw_col_op_b = []
+            for match in pw_val_match_b_1:
+                col = match // 4
+                val_idx = match % 4
+                # try:
+                pw_col_op_b.append((col, col_op_map[col]))
+                # except:
+                #     import pdb; pdb.set_trace()
+
             
             ps_col_agg_b.sort()
             pw_col_op_b.sort()
             pw_val_se_b.sort()
-            pw_val_match_b.sort()
-            result.append([ps_num_b, set(ps_col_agg_b), pw_num_b, pw_conn_op_b, set(pw_col_op_b), set(pw_val_se_b), set(pw_val_match_b)])
+            pw_val_match_b_1.sort()
+            result.append([ps_num_b, set(ps_col_agg_b), pw_num_b, pw_conn_op_b, set(pw_col_op_b), set(pw_val_se_b), set(pw_val_match_b_1)])
         return result
     
 
@@ -527,11 +651,14 @@ class SQLNet(nn.Module):
             header_types = tables[table_id]["types"]
 
             sn, sca, wn, wconn, wco, wv, wvm = y
+            wv = list(wv)
+            wv.sort()
             
             conn = CONN[wconn]
             wco_map = dict(wco)
             wvm_lst = [(match // 4, match % 4) for match in wvm]
             wva = ["".join(q_tok[wvs:wve+1]) for wvs,wve in wv]
+            # print(wva, wv)
 
             # scols = [f'{AGG[agg]}("{headers[col]}")' for col,agg in sca]
             scols = []
@@ -541,29 +668,48 @@ class SQLNet(nn.Module):
                 if agg == 0:
                     ca = f'"{headers[col]}"'
                 else:
-                    ca = f'{AGG[agg]}"({headers[col]})"'
+                    ca = f'{AGG[agg]}("{headers[col]}")'
                 scols.append(ca)
             
+            wcols = set(wco_map.keys())
+            scols_idx = set([col for col,_ in sca])
+            for col in wcols:
+                if col in scols_idx:
+                    continue
+                if col >= len(headers):
+                    continue
+                ca = f'"{headers[col]}"'
+                scols.append(ca)
+            
+            conds_s = []
             conds = []
             for c_idx,v_idx in wvm_lst:
                 col_ = headers[c_idx]
                 op_ = COND[wco_map[c_idx]]
                 val_ = wva[v_idx]
 
+                if c_idx in scols_idx:
+                    continue
+
+                val1_ = val_
                 if op_ in ("==", "=") and header_types[c_idx] == "text":
                     op_ = "like"
-                    val_ = f"%{val_}%"
+                    val1_ = f"%{val_}%"
                 
-                cond = f'("{col_}" {op_} "{val_}")'
-                conds.append(cond)
+                cond = f'("{col_}" {op_} "{val1_}")'
+                conds_s.append(cond)
+                conds.append([col_, op_, val_, c_idx])
 
             # conds = [f'("{headers[c_idx]}" {COND[wco_map[c_idx]]} "{wva[v_idx]}")' for c_idx, v_idx in wvm_lst]
 
-            sql_tmpl = (f'SELECT DISTINCT {",".join(scols)}\n'
-                        f'FROM "{table_id}"\n'
-                        f'WHERE {f" {conn} ".join(conds)}')
+            def sql_tmpl(scols, table_id, conn, conds_s):
+                tmpl = (f'SELECT DISTINCT {",".join(scols)}\n'
+                        f'FROM "{table_id}"\n')
+                if conds_s:
+                    tmpl += (f'WHERE {f" {conn} ".join(conds_s)}')
+                return tmpl
             
-            sql.append({"sql": sql_tmpl, "sel": scols})
+            sql.append({"sql": sql_tmpl(scols, table_id, conn, conds_s), "tmpl": sql_tmpl, "sel": scols, "table_id": table_id, "conn": conn, "conds": conds})
         
         return sql
 

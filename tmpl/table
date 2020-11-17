@@ -27,32 +27,38 @@
 <div class="col">
   <div class="col">
     <div class="input-group mb-3 d-flex flex-row">
-      <input type="text" class="form-control flex-fill" aria-describedby="qa-search" id="qa-input" readonly>
+      <input type="text" class="form-control flex-fill" aria-describedby="qa-search" id="qa-input">
       <div class="input-group-append">
-        <button class="btn btn-outline-secondary" type="button" id="qa-search" disabled>Search</button>
-        <button class="btn btn-outline-secondary" type="button" id="sql-table-prev" disabled>Prev</button>
-        <button class="btn btn-outline-secondary" type="button" id="sql-table-next" disabled>Next</button>
+        <button class="btn btn-outline-secondary" type="button" id="qa-search">Search</button>
+        <button class="btn btn-outline-secondary" type="button" id="sql-table-prev">Prev</button>
+        <button class="btn btn-outline-secondary" type="button" id="sql-table-next">Next</button>
         <button class="btn btn-outline-secondary" type="button" id="sql-table-rand">Random</button>
       </div>
     </div>
     <div id="__qa-results"></div>
   </div>
+  <div class="col">
+    <table class="table">
+    <thead>
+      <tr>
+        {% for hdr in headers %}
+        <th scope="col">{{hdr}}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+    <tr>
+      {% for cell in row %}
+      <td>{{cell}}</td>
+      {% endfor %}
+    </tr>
+    {% endfor%}
+    </tbody>
+    </table>
+    <div class="row">
 
-  <div class="d-inline-flex flex-wrap">
-  {% for title,text,links in gold %}
-  <div class="card" style="width: 16rem;">
-    <div class="card-body">
-      <h5 class="card-title">{{ title }}</h5>
-      <p class="card-text">{{ text }}</p>
     </div>
-
-    <div class="card-body">
-    {% for href in links %}
-      <a href="/nl2sql/table/{{href}}" class="card-link card-link-{{href}}">{{href}}</a>
-    {% endfor %}
-    </div>
-  </div>
-  {% endfor %}
   </div>
 </div>
 {% endblock %}
@@ -69,15 +75,11 @@
   width: 40%;
   display: flex;
 }
-
-.card-link-384, .card-link-393, .card-link-399 {
-  color: red;
-}
 </style>
 
 <script>
 
-var autocomplete_data = [];
+var autocomplete_data = {{ examples }};
 $("#qa-input").autocomplete({source: autocomplete_data, minLength: 0})
                           .mousedown(e => {
                               console.log(e)
@@ -132,5 +134,6 @@ $("#sql-table-rand").on("click", (e) => {
   //window.location.href = `/nl2sql`;
 });
 
+window.table_idx = {{table_idx}};
 </script>
 {% endblock %}

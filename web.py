@@ -1,5 +1,7 @@
+import sys
 import json
 import random
+import importlib
 from collections import OrderedDict
 
 from collections import OrderedDict
@@ -11,6 +13,8 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from xsql import infer, xsql_init
 
+import gold
+
 
 env = Environment(
     loader=FileSystemLoader('tmpl'),
@@ -18,7 +22,7 @@ env = Environment(
 )
 
 
-app = Sanic()
+app = Sanic("xsql-web")
 
 
 cros_headers = {
@@ -61,7 +65,7 @@ async def sql_qa(request):
         results = {}
     else:
         results = results[0]
-    return response.json(results, headers=cros_headers)
+    return response.json({"sql": results["sql"], "sel": results["sel"], "data": results["data"]}, headers=cros_headers)
 
 
 @app.route("/table/<table_idx>")
@@ -80,7 +84,7 @@ async def sql_table(request, table_idx):
     rows = table["rows"]
     examples = [ex["question"] for ex in table["example"]]
 
-    template = env.get_template("index")
+    template = env.get_template("table")
     print(examples)
 
     return response.html(template.render(headers=headers, rows=rows, table_idx=table_idx, examples=examples))
@@ -89,8 +93,11 @@ async def sql_table(request, table_idx):
 # reverse proxy router: /nl2sql/ -> [self.ip:port]
 @app.route("/")
 async def index(request):
-    table_idx = random.randint(0, 3000)
-    return response.redirect(f"/nl2sql/table/{table_idx}")
+    # table_idx = random.randint(0, 3000)
+    # return response.redirect(f"/nl2sql/table/{table_idx}")
+    importlib.reload(gold)
+    template = env.get_template("index")
+    return response.html(template.render(gold=gold.gold))
 
 
 if __name__ == "__main__":
@@ -99,4 +106,5 @@ if __name__ == "__main__":
     
     xsql_init()
     
-    app.run(host="0.0.0.0", port=9600)
+    port = int(sys.argv[1])
+    app.run(host="0.0.0.0", port=port)

@@ -62,6 +62,7 @@ class Checkpoint(object):
             for name in fastforward:
                 if re.search(to, name) is not None:
                     to_model = name
+                    break
         if to_model:
             model_location = os.path.join(checkpoint, to_model)
             print("Fastforward to:", model_location)
@@ -78,15 +79,24 @@ class Checkpoint(object):
                 app.optimizer.load_state_dict(state["optim"])
         return self
 
-    def save_every(self, iters=-1):
-        @self.app.on("iter_completed")
-        def save(e):
-            if iters <= 0:
-                return self
-            current_iter = e.current_iter
-            if current_iter % iters == 0:
-                torch.save({"start": current_iter + 1, "model": e.model.state_dict(), "optim": e.optimizer.state_dict()},
-                           os.path.join(self.checkpoint_root, f"{e.model.__class__.__name__}.{current_iter}.pt"))
+    def save_every(self, iters=-1, epochs=-1):
+        if iters > 0:
+            @self.app.on("iter_completed")
+            def save(e):
+                if iters <= 0:
+                    return self
+                current_iter = e.current_iter
+                if current_iter % iters == 0:
+                    torch.save({"start": current_iter + 1, "model": e.model.state_dict(), "optim": e.optimizer.state_dict()},
+                            os.path.join(self.checkpoint_root, f"{e.model.__class__.__name__}.{current_iter}.pt"))
+        if epochs > 0:
+            @self.app.on("epoch_completed")
+            def save(e):
+                current_iter = e.current_iter
+                current_epoch = e.current_epoch
+                if current_epoch % epochs == 0:
+                    torch.save({"start": current_iter + 1, "model": e.model.state_dict()},
+                            os.path.join(self.checkpoint_root, f"{e.model.__class__.__name__}.{current_iter}.pt"))
         return self
 
 
@@ -97,6 +107,7 @@ class App(object):
         train_started:
         iter_started / train:
         iter_completed:
+        epoch_completed:
         train_completed:
 
         evaluate:
@@ -221,11 +232,13 @@ class App(object):
 
         progress = tqdm(total=max_iters, miniters=0)
         current_iter = self.current_iter
+        event.progress = progress
         event.progress.n = current_iter
         event.progress.last_print_n = current_iter
 
         event.progress = progress
 
+        current_epoch = 0
         while current_iter < max_iters + 1:
             iterator = enumerate(data)
             
@@ -233,8 +246,10 @@ class App(object):
             valid_iters = 0
             event.info = defaultdict(int)
             
+
             for i,batch in iterator:
                 event.current_iter = current_iter
+                event.current_epoch = current_epoch
                 event.batch = batch
                 event.i = i
 
@@ -251,7 +266,7 @@ class App(object):
                 self.optimizer.step()
 
                 avg_loss += loss
-                progress.set_postfix(avg_loss = avg_loss / cnt)
+                progress.set_postfix(avg_loss = avg_loss / valid_iters)
 
                 for info_k, info_v in info.items():
                     event.info[info_k] += info_v
@@ -261,9 +276,12 @@ class App(object):
                 current_iter += 1
                 if current_iter >= max_iters + 1:
                     break
-                
+
                 event.progress.update(1)
+            self.exec_handles("epoch_completed", event)
             print({k: v/valid_iters for k,v in event.info.items()})
+
+            current_epoch += 1
 
         self.exec_handles("train_completed", event)
         return self

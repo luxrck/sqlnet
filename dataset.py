@@ -24,45 +24,84 @@ def find_se(x, it):
 
 
 
-def get_gold(records, table):
-    result = []
+def generate_inputs(bert_tokenizer, records, table, padding_to=300, max_headers=30, max_selected=4, device="cuda"):
+    PAD = 0
+    CLS = 101
+    SEP = 102
+    EMPTY = 90 # [unused90]
+    # import pdb; pdb.set_trace()
+    # type_q
+    # type_h_text
+    # type_h_real
+    # type_h_empty
+    # token_types = 4
+    header_type_map = {
+        "text": 1,
+        "real": 2,
+        "empty": 3
+    }
+
+    TEXT = '[unused1]'
+    REAL = '[unused4]'
+
     bs = len(records)
-    gs_num, gs_col, gs_agg, gw_num, gw_conn_op, gw_col, gw_op, gw_val_s, gw_val_e = [[] for _ in range(9)]
     
-    for b in range(bs):
-        rec = records[b]
+    x_input = torch.zeros(bs, padding_to, dtype=torch.long).to(device)
+    attention_mask = torch.zeros(bs, padding_to, dtype=torch.long).to(device)
+    token_type_ids = torch.zeros(bs, padding_to, dtype=torch.long).to(device)
+    
+    q_length = []
+    h_length = []
+    seps = []
+
+    
+    for b, rec in enumerate(records):
         tid = rec["table_id"]
         q = rec["question"]
-        sql = rec["sql"]
-        agg = sql["agg"]
-        sel = sql["sel"]
-        if type(agg) != list:
-            agg = [agg]
-        if type(sel) != list:
-            sel = [sel]
-        conn_op = sql.get("cond_conn_op", 0)
-        conds = sql["conds"]
-
         tb = table[tid]
         header = tb["header"]
         header_types = tb["types"]
 
-        ls_num = len(sql)
-        ls_col = sel
-        ls_agg = agg
-        lw_num = len(conds)
-        lw_conn_op = conn_op
-        lw_col = [cond[0] for cond in conds]
-        lw_op = [cond[1] for cond in conds]
-        lwvs = []
+        # + [EMPTY] col
+        l_header = len(header) + 1
 
+        q_tok = bert_tokenizer.tokenize(q, add_special_tokens=False)
+        rec["q_tok"] = q_tok
+        q_len = len(q_tok)
+
+        q_length.append(q_len)
+        h_length.append(l_header)
+
+        hdr_enc = []
+        for i,hdr in enumerate(header):
+            he = bert_tokenizer.encode(hdr, add_special_tokens=False)
+            h_type = header_type_map[header_types[i]]
+            hdr_enc += [SEP] + [h_type] + he
+        q_enc = bert_tokenizer.encode(q, add_special_tokens=False)
+        # q_enc = [CLS] + q_enc
+        x = [CLS] + q_enc + hdr_enc + [SEP, header_type_map["empty"], EMPTY, SEP]
+
+        seq_len = len(x)
+        # x += [PAD] * (padding_to - seq_len)
+        x = torch.tensor(x, dtype=torch.long).to(device)
+        x_input[b, :seq_len] = x
+        attention_mask[b, :seq_len] = 1
+        sep_i = (x == SEP).nonzero().squeeze(1).tolist()
+        seps.append(sep_i)
+
+        x_q_tok_len = sep_i[0]
+        # token_type_id = [0] * x_q_tok_len + [1] * (seq_len - x_q_tok_len) + [0] * (padding_to - seq_len)
+        token_type_ids[b, x_q_tok_len:seq_len] = 1
+
+    # import pdb; pdb.set_trace()
+    return (x_input, attention_mask, token_type_ids, q_length, h_length, seps)
 
 
 
 # max_seq_len: 246
 # max_headers: 24
 # max_q_len: 86
-def generate_inputs(bert_tokenizer, records, table, padding_to=300, max_headers=30, max_selected=4, device="cuda"):
+def generate_samples(bert_tokenizer, records, table, padding_to=300, max_headers=30, max_selected=4, device="cuda"):
     PAD = 0
     CLS = 101
     SEP = 102
@@ -155,6 +194,7 @@ def generate_inputs(bert_tokenizer, records, table, padding_to=300, max_headers=
 
         q_tok = bert_tokenizer.tokenize(q, add_special_tokens=False)
         q_len = len(q_tok)
+        rec["q_tok"] = q_tok
 
         cond_val_idx = set()
 

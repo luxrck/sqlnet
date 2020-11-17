@@ -3,6 +3,7 @@ import json
 import traceback
 
 import sqlite3
+from fuzzywuzzy import fuzz
 
 import torch
 from torch.autograd import Variable
@@ -19,9 +20,19 @@ from model import SQLNet
 from dataset import *
 from train import *
 
-torch.cuda.set_device(0)
+#torch.cuda.set_device(0)
 
 
+def find_val(rows, c_idx, val):
+    top_score = 0
+    y_val = val
+    for i, row in enumerate(rows):
+        g_val = str(row[c_idx])
+        score = fuzz.ratio(val, g_val)
+        if score > top_score:
+            top_score = score
+            y_val = g_val
+    return y_val
 
 def infer(q, tables):
     global app, db, bert_tokenizer
@@ -30,12 +41,37 @@ def infer(q, tables):
     with torch.no_grad():
         inputs = generate_inputs(bert_tokenizer, q, tables)
         y_predict = app.model(inputs)
-        sqli = app.model.predict(y_predict, h_length=inputs[-2])
+        sqli = app.model.predict(y_predict, h_length=inputs[-2], records=q, tables=tables)
+        print("sqli:", sqli)
         sqls = app.model.sql(sqli, q, tables)
 
         for b,sql in enumerate(sqls):
+            table_id = q[b]["table_id"]
+            header_types = tables[table_id]["types"]
+            select_all = f'SELECT * FROM "{table_id}";'
+            # print(sql)
             resp = db.execute(sql["sql"]).fetchall()
+            if not resp:
+                rows = db.execute(select_all).fetchall()
+                conds = sql["conds"]
+                conds_s = []
+                for cond in conds:
+                    col_, op_, val_, c_idx = cond
+                    col_type_ = header_types[c_idx]
+                    if cond[1] in ("==", "=", "like") and col_type_ == "text":
+                        # cond[3]: header_idx
+                        # cond[2]: w_val
+                        # cond[1]: w_op
+                        # cond[0]: w_col
+                        val_ = find_val(rows, c_idx, val_)
+                        cond[2] = val_
+                    cond = f'("{col_}" {op_} "{val_}")'
+                    conds_s.append(cond)
+                sql_matched = sql["tmpl"](sql["sel"], sql["table_id"], sql["conn"], conds_s)
+                sql["sql"] = sql_matched
+                resp = db.execute(sql_matched).fetchall()
             sql["data"] = resp
+            print(f"sql[{b}]:", sql)
     return sqls
 
 
@@ -60,7 +96,7 @@ def xsql_init():
     app = App(model=model)
     app.extend(Checkpoint())
 
-    app = app.fastforward(to="last")   \
+    app = app.fastforward(to=".+\.37\.pt")   \
        .set_optimizer(optim.AdamW, lr=1e-6) \
        .to("auto")  \
        .save_every(iters=-1)    \
@@ -103,9 +139,9 @@ if __name__ == "__main__":
         
         gw_val = labels[-2]
         y_predict = model(inputs, gw_val=gw_val)
-        loss, labels = model.loss(y_predict, gw_val=gw_val)
+        loss, labels = model.loss(y_predict, labels)
         # sql_i = model.predict(y_predict, labels, q_length=inputs[3], h_length=inputs[4])
-        detail = model.detail(y_predict, labels, col_sel=col_sel, col_whr=col_whr, col_match=col_match, q_length=inputs[3], records=t, table=train_table)
+        detail = model.detail(y_predict, labels, col_sel=col_sel, col_whr=col_whr, col_match=col_match, q_length=inputs[3], records=e.batch, tables=train_table)
 
         loss.backward()
 
@@ -148,9 +184,29 @@ if __name__ == "__main__":
         gw_val = None
         y_predict = model(inputs, gw_val=gw_val)
         # loss, labels = model.loss(y_predict, labels)
-        sql_i = model.predict(y_predict, h_length=inputs[4])
-        import pdb; pdb.set_trace()
+        sql_i = model.predict(y_predict, h_length=inputs[4], records=e.batch, tables=train_table)
+        # import pdb; pdb.set_trace()
         # sql = model.sql(sql_i, e.batch, train_table)
+
+        # b = len(sql_i)
+        # for i in range(b):
+        #     y_ = sql_i[i]
+        #     g_ = gold[i]
+        #     sn, sca, wn, wconn, wco, wv, wvm = y_
+        #     gsn, gsca, gwn, gwconn, gwco, gwv, gwvm = g_
+        #     if gsca.issubset(sca) and wconn == gwconn and wco == gwco and wvm == gwvm:
+        #         continue
+        #     else:
+        #         e.batch[i]["y"] = y_
+        #         e.batch[i]["g"] = g_
+        #         out = {
+        #             "q": e.batch[i]["question"],
+        #             "t": e.batch[i]["table_id"],
+        #             "y": [sca, wco, wv, wvm],
+        #             "g": [gsca, gwco, gwv, gwvm],
+        #             "h": dev_table[e.batch[i]["table_id"]]["header"],
+        #         }
+        #         print(out)
 
         return sql_i, gold
 
@@ -158,12 +214,18 @@ if __name__ == "__main__":
     y,g = app.fastforward(to="last")   \
        .set_optimizer(optim.AdamW, lr=1e-6) \
        .to("auto")  \
-       .save_every(iters=-1)    \
+       .save_every(epochs=-1)    \
        .build() \
        .eval(train_iter)
-    #    .run(train_iter, max_iters=10000, train=False)
-    #    .eval(train_iter)
+    #    .run(train_iter, max_iters=10000, train=True)
     
+    lsn = 0
+    lsca = 0
+    lwn = 0
+    lwconn = 0
+    lwco = 0
+    lwvm = 0
+
     lx = 0
     cnt = 0
     for i in range(len(y)):
@@ -173,10 +235,22 @@ if __name__ == "__main__":
             g_ = g[i][bi]
             sn, sca, wn, wconn, wco, wv, wvm = y_
             gsn, gsca, gwn, gwconn, gwco, gwv, gwvm = g_
-            if sn == gsn and sca == gsca and wn == gwn and wconn == gwconn and wco == gwco and wvm == gwvm:
+            if gsca == sca and wconn == gwconn and wco == gwco and wvm == gwvm:
                 lx += 1
+            if sn == gsn:
+                lsn += 1
+            if sca == gsca:
+                lsca += 1
+            if wn == gwn:
+                lwn += 1
+            if wconn == gwconn:
+                lwconn += 1
+            if wco == gwco:
+                lwco += 1
+            if wvm == gwvm:
+                lwvm += 1
             cnt += 1
-    print(lx / cnt)
+    print(lx / cnt, lsn / cnt, lsca / cnt, lwn / cnt, lwconn / cnt, lwco / cnt, lwvm / cnt)
     # app.model.eval()
     # with torch.no_grad():
     #     table_id = None
@@ -191,3 +265,5 @@ if __name__ == "__main__":
     #                 print(infer([q], train_table))
     #             except Exception as e:
     #                 print(e)
+
+    # 0.87451564828614 0.9943368107302534 0.9630402384500745 0.9797317436661699 0.9937406855439642 0.9374068554396423 0.9126676602086438
